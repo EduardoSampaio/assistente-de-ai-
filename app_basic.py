@@ -11,18 +11,61 @@ from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
-
+from langchain_groq import ChatGroq
 
 load_dotenv()  # carrega variáveis de ambiente do arquivo .env
 
+def carregar_documentos():
+    """
+    Carrega o arquivo PDF 'politica_rh.pdf', divide o conteúdo em chunks 
+    (blocos de texto) menores para otimizar a busca e o processamento de RAG.
+    
+    Returns:
+        list: Lista de documentos processados (chunks).
+    """
+    # Carregar documentos PDF
+    loader = PyPDFLoader("politica_rh.pdf")
+    documentos = loader.load()
+
+    # Dividir documentos em chunks menores
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks = text_splitter.split_documents(documentos)
+
+    return chunks
+
+# Processo de embeddings e criação do banco vetorial
+def criar_vectorstore():
+    """
+    Cria a base de dados vetorial (FAISS) a partir dos chunks de texto, 
+    utilizando embeddings do HuggingFace para representar o significado do texto.
+    
+    Returns:
+        FAISS: O objeto de banco vetorial populado.
+    """
+    chunks = carregar_documentos()
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
+    return vectorstore
+
+banco_vetores = criar_vectorstore()
+
 
 # logica do agende de IA
-
-def criar_chain_agente():
+def criar_chain_agente(vectorstore):
+    """
+    Cria a cadeia de processamento (chain) do assistente de IA.
+    Configura o prompt, o retriever (buscador no banco vetorial) e o modelo LLM.
+    
+    Args:
+        vectorstore (FAISS): O banco vetorial usado para busca de contexto.
+        
+    Returns:
+        chain: A cadeia configurada com LangChain (LCEL) pronta para uso.
+    """
     prompt_template = ChatPromptTemplate.from_template(
         """
     Você é um assistente de RH que responde perguntas sobre políticas internas da empresa.
@@ -35,16 +78,17 @@ def criar_chain_agente():
     A Resposta: 
     """)
     
-    def criar_contexto(prompt_usuario: str) -> str:
-        return "Politica de RH da empresa XYZ. Documentos internos sobre benefícios, férias, conduta, etc."
+  
+    retriever = banco_vetores.as_retriever(search_type="similarity", search_kwargs={"k": 3})
     
-    llm = ChatOpenAI(model="gemini-2.5-flash-lite", temperature=0.2, max_tokens=500)
+    llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0)
 
-    chain = ({"context": criar_contexto, "question": RunnablePassthrough() }  
+    chain = ({"context": retriever, "question": RunnablePassthrough() }  
              | prompt_template 
              | llm
              | StrOutputParser())
     return chain
+
 
 # ============================================================
 # INTERFACE
@@ -53,7 +97,7 @@ def criar_chain_agente():
 st.title("Assistente RAG — Políticas Internas")
 
 # carregar chain e vector store
-chain = criar_chain_agente()
+chain = criar_chain_agente(banco_vetores)
 # inicia a lista de mensagens
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
